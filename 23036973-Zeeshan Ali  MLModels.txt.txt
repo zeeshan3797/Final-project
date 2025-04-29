@@ -1,0 +1,464 @@
+# Mount Google Drive for dataset access
+from google.colab import drive
+drive.mount('/content/drive')
+
+# Core libraries
+import os
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+import matplotlib.pyplot as plt
+import seaborn as sns  # reverted alias for contrast
+
+# Utility and preprocessing modules
+from shutil import copyfile as copy_util
+from sklearn.preprocessing import MinMaxScaler as MinMax
+from tensorflow.keras import Sequential as SequentialModel
+from tensorflow.keras.models import Model as BaseModel
+from tensorflow.keras import layers as LayerSet
+from tensorflow.keras.losses import MeanSquaredError as MSELoss
+from tensorflow.keras.optimizers import Adam as AdamOpt
+from tensorflow.keras.callbacks import EarlyStopping as EarlyStop
+
+# Define the root path for dataset files
+data_path = '/content/drive/MyDrive/Zz/dataset/'
+
+# Mapping of dataset labels to corresponding filenames
+file_lookup = {
+    "benign_sample": "1.benign.csv",
+    "ack_mirai": "1.mirai.ack.csv",
+    "scan_mirai": "1.mirai.scan.csv",
+    "syn_mirai": "1.mirai.syn.csv",
+    "udp_mirai": "1.mirai.udp.csv",
+    "plain_udp_mirai": "1.mirai.udpplain.csv",
+    "combo_gafgyt": "1.gafgyt.combo.csv",
+    "junk_gafgyt": "1.gafgyt.junk.csv",
+    "scan_gafgyt": "1.gafgyt.scan.csv",
+    "tcp_gafgyt": "1.gafgyt.tcp.csv",
+    "udp_gafgyt": "1.gafgyt.udp.csv"
+}
+
+# Load CSVs into a dictionary of DataFrames
+loaded_data = {key: pd.read_csv(os.path.join(data_path, filename)) for key, filename in data_files.items()}
+# Base directory for second dataset batch
+second_batch_path = '/content/drive/MyDrive/Zz/dataset/'
+
+# Mapping of descriptive names to corresponding CSV filenames (second batch)
+second_batch_files = {
+    "benign_v2": "2.benign .csv",
+    "mirai_scan_v2": "2.mirai.scan.csv",
+    "mirai_ack_v2": "2.mirai.ack.csv",
+    "mirai_syn_v2": "2.mirai.syn.csv",
+    "mirai_udp_v2": "2.mirai.udp.csv",
+    "mirai_plain_udp_v2": "2.mirai.udpplain.csv",
+    "gafgyt_combo_v2": "2.gafgyt.combo.csv",
+    "gafgyt_junk_v2": "2.gafgyt.junk.csv",
+    "gafgyt_scan_v2": "2.gafgyt.scan.csv",
+    "gafgyt_tcp_v2": "2.gafgyt.tcp.csv",
+    "gafgyt_udp_v2": "2.gafgyt.udp.csv"
+}
+
+# Load all files into a dictionary
+second_batch_data = {
+    label: pd.read_csv(os.path.join(second_batch_path, file_name))
+    for label, file_name in second_batch_files.items()
+}
+# Sampling fractions for each traffic type
+sampling_plan = {
+    'normal_traffic': 0.5,
+    'mirai_ack_attack': 0.24,
+    'mirai_port_scan': 0.22,
+    'mirai_syn_flood': 0.2,
+    'mirai_udp_flood': 0.1,
+    'mirai_plain_udp': 0.3,
+    'gafgyt_combo_attack': 0.4,
+    'gafgyt_junk_traffic': 0.8,
+    'gafgyt_port_scan': 0.8,
+    'gafgyt_tcp_flood': 0.25,
+    'gafgyt_udp_flood': 0.23
+}
+
+# Apply sampling and labeling
+tagged_samples = []
+for category, fraction in sampling_plan.items():
+    df_sampled = loaded_data[category].sample(frac=fraction, replace=False)
+    df_sampled['label'] = category  # Use 'label' instead of 'type' to vary naming
+    tagged_samples.append(df_sampled)
+
+# Combine all sampled and labeled data
+complete_dataset = pd.concat(tagged_samples, axis=0, ignore_index=True)
+# Define sampling rates for unseen dataset (version 2)
+sampling_strategy_v2 = {
+    'benign_v2': 0.5,
+    'mirai_ack_v2': 0.24,
+    'mirai_scan_v2': 0.22,
+    'mirai_syn_v2': 0.2,
+    'mirai_udp_v2': 0.1,
+    'mirai_plain_udp_v2': 0.3,
+    'gafgyt_combo_v2': 0.4,
+    'gafgyt_junk_v2': 0.8,
+    'gafgyt_scan_v2': 0.8,
+    'gafgyt_tcp_v2': 0.25,
+    'gafgyt_udp_v2': 0.23
+}
+
+# Process and tag unseen samples
+unseen_samples = []
+for label, portion in sampling_strategy_v2.items():
+    df_subsample = second_batch_data[label].sample(frac=portion, replace=False)
+    df_subsample['category'] = label.replace('_v2', '')  # Tag by label, drop version suffix
+    unseen_samples.append(df_subsample)
+
+# Combine all unseen sample subsets into one DataFrame
+unseen_traffic = pd.concat(unseen_samples, axis=0, ignore_index=True)
+# Trim features to first 28 columns and re-attach label column
+processed_data = complete_dataset.iloc[:, :28].copy()
+processed_data['label'] = complete_dataset['label']
+
+unseen_trimmed = unseen_traffic.iloc[:, :28].copy()
+unseen_trimmed['label'] = unseen_traffic['category']
+
+# Display instance count per class in training dataset
+class_distribution = processed_data['label'].value_counts()
+# Show count of each class in the unseen dataset
+unseen_summary = unseen_traffic['category'].value_counts()
+
+# Summary statistics for original and secondary benign datasets
+benign_stats_v1 = loaded_data['normal_traffic'].describe()
+benign_stats_v2 = second_batch_data['benign_v2'].describe()
+
+# Shuffle the rows of the primary dataset
+shuffled_indices = np.random.permutation(len(processed_data))
+shuffled_data = processed_data.iloc[shuffled_indices].reset_index(drop=True)
+
+# Preview shuffled dataset
+shuffled_preview = shuffled_data.head()
+# ML Models and Utilities
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.ensemble import RandomForestClassifier as RF
+from sklearn.svm import SVC as SupportVector
+from sklearn.neural_network import MLPClassifier as NeuralNet
+from sklearn.metrics import accuracy_score
+from imblearn.over_sampling import SMOTE
+
+# Extract only numerical columns from the dataset
+numeric_features = shuffled_data.select_dtypes(include=[np.number])
+
+# Generate correlation matrix from numerical columns
+feature_corr = numeric_features.corr()
+
+# Plot the heatmap for feature correlations
+plt.figure(figsize=(14, 12))
+sns.heatmap(data=feature_corr, annot=True, cmap='coolwarm', fmt='.2f')
+plt.title("Correlation Between Input Features")
+plt.tight_layout()
+plt.show()
+
+ # Shuffle unseen dataset independently
+unseen_shuffle_idx = np.random.permutation(len(unseen_traffic))
+shuffled_unseen = unseen_traffic.iloc[unseen_shuffle_idx].reset_index(drop=True)
+# Split data into input variables and target labels
+features_train = shuffled_data.drop(['label'], axis=1)
+labels_train = shuffled_data[['label']]
+
+features_unseen = shuffled_unseen.drop(['category'], axis=1)
+labels_unseen = shuffled_unseen[['category']]
+
+# Normalize the feature sets
+from sklearn.preprocessing import StandardScaler
+scaler_instance = StandardScaler()
+scaled_train = scaler_instance.fit_transform(features_train)
+scaled_unseen = scaler_instance.transform(features_unseen)
+
+# Encode string labels into numeric classes
+label_encoding_map = dict([
+    ("benign", 0), ("mirai_ack", 1), ("mirai_scan", 2), ("mirai_syn", 3),
+    ("mirai_udp", 4), ("mirai_udp_plain", 5), ("gafgyt_combo", 6),
+    ("gafgyt_junk", 7), ("gafgyt_scan", 8), ("gafgyt_tcp", 9), ("gafgyt_udp", 10)
+])
+
+y_train_encoded = y_train['label'].replace(label_map).values
+y_test_encoded = y_test['category'].replace(label_map).values
+
+# Assemble data dictionaries for model input
+training_data = dict(inputs=X_train_scaled, targets=y_train_encoded)
+testing_data = dict(inputs=X_test_scaled, targets=y_test_encoded)
+
+# Extract arrays for model input
+X_iot_test = test_dataset['features']
+y_iot_test = test_dataset['labels']
+from sklearn.model_selection import KFold
+from tensorflow.keras.callbacks import EarlyStopping as StopEarly
+from tensorflow.keras import Sequential
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras import layers as L
+import numpy as np
+
+# Prepare data for training
+input_features = train_dataset['features']
+output_labels = train_dataset['labels']
+
+# Configure K-Fold parameters
+fold_count = 5
+kfold = KFold(n_splits=fold_count, shuffle=True, random_state=42)
+cv_results = []
+
+
+# Early stopping setup
+stop_callback = StopEarly(monitor='val_loss', patience=3, restore_best_weights=True)
+
+# Perform cross-validation using K-Fold strategy
+for fold_num, (idx_train, idx_valid) in enumerate(kfold.split(input_features, output_labels), start=1):
+    print(f"Processing fold {fold_num} of {fold_count}...")
+
+    # Partition training and validation sets
+    X_train_fold, X_valid_fold = input_features[train_idx], input_features[valid_idx]
+    y_train_fold, y_valid_fold = output_labels[train_idx], output_labels[valid_idx]
+
+    # Initialize model architecture for the current fold
+    model_this_fold = Sequential()
+    model_this_fold.add(L.Dense(64, activation='relu', input_dim=X_train_fold.shape[1]))
+    model_this_fold.add(L.Dense(32, activation='relu'))
+    model_this_fold.add(L.Dense(1, activation='sigmoid'))  # For binary output
+
+    # Compile the model with optimizer and loss
+    model_this_fold.compile(
+        loss='binary_crossentropy',
+        optimizer=Adam(),
+        metrics=['accuracy']
+    )
+
+    # Fit model to training data
+    model_this_fold.fit(
+        x=X_train_fold,
+        y=y_train_fold,
+        epochs=10,
+        batch_size=32,
+        validation_data=(X_valid_fold, y_valid_fold),
+        callbacks=[stop_callback],
+        verbose=2
+    )
+
+    # Assess model on validation data
+    loss_eval, acc_eval = model_this_fold.evaluate(X_valid_fold, y_valid_fold, verbose=0)
+    cv_results.append(acc_eval)
+
+    print(f"Fold {i} - Accuracy on Validation Set: {acc_eval:.4f}")
+
+# Calculate average performance across all folds
+average_cv_score = np.mean(cv_results)
+# print(f"\nAverage Accuracy Across {fold_count} Folds: {average_cv_score:.4f}")
+# Synthetic data balancer
+from imblearn.over_sampling import SMOTE
+augmentor = SMOTE(random_state=42)
+
+# Classifiers: Gradient-Based, Tree-Based, SVM, etc.
+from sklearn.ensemble import (
+    RandomForestClassifier as RF,
+    AdaBoostClassifier as AdaBoost,
+    ExtraTreesClassifier as ExtraTrees,
+    GradientBoostingClassifier as GB,
+    HistGradientBoostingClassifier as HistGB
+)
+from xgboost import XGBClassifier as XGB
+
+# Basic learners
+from sklearn.svm import SVC as SVMClassifier
+from sklearn.neighbors import KNeighborsClassifier as KNNClassifier
+from sklearn.tree import DecisionTreeClassifier as TreeClassifier
+from sklearn.neural_network import MLPClassifier as MultiLayerPerceptron
+neural_net_model = NeuralNet()
+
+# Additional classic models
+from sklearn.linear_model import LogisticRegression as LogReg
+from sklearn.naive_bayes import GaussianNB as NB
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
+
+# Scikit-learn utility modules
+import sklearn.model_selection as model_select
+import sklearn.metrics as metric_tools
+import sklearn.preprocessing as preprocess
+import sklearn.multiclass as multi_class
+
+# Optional alternative access (not required but kept unique)
+import sklearn.svm as svm_mod
+import sklearn.tree as tree_mod
+import sklearn.neighbors as nbr_mod
+# Specify parameter tuning ranges for multiple models
+param_grid_options = {
+    'RF_Classifier': {
+        'n_estimators': [50, 100, 200],
+        'max_depth': [None, 10, 20, 30],
+        'min_samples_split': [2, 5, 10]
+    },
+    'RBF_SVM': {
+        'C': [0.1, 1, 10, 100],
+        'gamma': [0.1, 1, 10, 100],
+        'kernel': ['rbf']
+    },
+    'MLP_Classifier': {
+        'hidden_layer_sizes': [(50,), (100,), (50, 50)],
+        'activation': ['tanh', 'relu'],
+        'solver': ['sgd', 'adam'],
+        'alpha': [0.0001, 0.001, 0.01]
+    }
+}
+from sklearn.model_selection import cross_val_score
+from sklearn import metrics
+import joblib
+
+# Define classifiers to benchmark
+models_to_test = {
+    'RandomForest': RF(),
+    'SVM_rbf': SupportVM(kernel='rbf'),
+    'NeuralNet': NeuralNet()
+}
+
+# Initialize result containers
+test_predictions = []
+unseen_predictions = []
+evaluation_logs = []
+metrics_summary = []
+
+# Train and predict on each classifier
+for clf_name, clf_model in models_to_test.items():
+    print(f"\n▶ Training model: {clf_name}")
+    clf_model.fit(X_iot_test, y_iot_test)
+
+    # Optionally save the model
+    # joblib.dump(clf_model, f'{clf_name}_model.pkl')
+
+    # Predict on test and unseen datasets
+    y_test_pred = clf_model.predict(X_iot_test)
+    y_unseen_pred = clf_model.predict(X_iot_test)
+
+    test_predictions.append(y_test_pred)
+    unseen_predictions.append(y_unseen_pred)
+
+    # Perform cross-validation and gather performance metrics
+    cv_result_scores = cross_val_score(estimator=clf_model, X=X_iot_test, y=y_iot_test, cv=5)
+    eval_accuracy = metrics.accuracy_score(y_true=y_iot_test, y_pred=y_test_pred)
+    matrix_confusion = metrics.confusion_matrix(y_iot_test, y_test_pred)
+    detailed_report = metrics.classification_report(y_iot_test, y_test_pred)
+
+    # Parse classification report for core metrics
+    main_line = class_report.splitlines()[7].split()
+    results_row = {
+        'Model': clf_name,
+        'Accuracy': test_accuracy,
+        'CV_Mean': cv_scores.mean(),
+        'Precision': float(main_line[1]),
+        'Recall': float(main_line[2]),
+        'F1-Score': float(main_line[3]),
+        'True_Negative': conf_matrix[0][0],
+        'False_Positive': conf_matrix[0][1],
+        'False_Negative': conf_matrix[1][0],
+        'True_Positive': conf_matrix[1][1]
+
+    }
+
+    metrics_summary.append(results_row)
+
+     # Append evaluation summary for inspection
+    model_logs.extend([
+        f"\n>>> Results for {model_id} <<<",
+        f"Average CV Score: {cv_scores.mean():.4f}",
+        f"Validation Accuracy: {test_accuracy:.4f}",
+        "Matrix:",
+        conf_matrix,
+        "Detailed Report:",
+        report
+    ])
+
+# To export results:
+# pd.DataFrame(metrics_summary).to_csv('evaluation_results.csv', index=False)
+# Select a model for visualization
+model_name_to_plot = list(models_to_test.keys())[0]
+
+# Initialize plot canvas
+fig, axis = plt.subplots(figsize=(10, 8))
+
+# Train and predict using the selected model
+chosen_model = models_to_test[model_name_to_plot]
+chosen_model.fit(X_iot_test, y_iot_test)
+predicted_labels = chosen_model.predict(X_iot_test)
+
+# matrix
+conf_matrix = metrics.confusion_matrix(y_iot_test, predicted_labels)
+
+# Draw the heatmap
+sbn.heatmap(conf_matrix, annot=True, fmt="d", cbar=False, ax=axis)
+axis.set_title(f"Confusion Matrix - {model_name_to_plot}")
+axis.set_ylabel("Ground Truth")
+axis.set_xlabel("Predicted Label")
+
+# Graph
+#plt.show()
+# Evaluation name and result containers for unseen/test data
+evaluation_id = 'iotModelEval_Unseen'
+unseen_results = []
+evaluation_summary = []
+
+# Loop over each trained model and evaluate on unseen dataset
+for clf_label, unseen_pred in zip(models_to_test.items(), unseen_predictions):
+    model_id, model_obj = clf_label
+    result_row = {}
+
+    # Predict again to ensure consistency
+    predicted_unseen = model_obj.predict(X_iot_test)
+
+    # Calculate metrics for unseen dataset
+    accuracy_unseen = metrics.accuracy_score(y_iot_test, predicted_unseen)
+    conf_matrix_unseen = metrics.confusion_matrix(y_iot_test, predicted_unseen)
+    report_unseen = metrics.classification_report(y_iot_test, predicted_unseen)
+
+    # Parse classification report for core metrics
+    parsed_lines = unseen_report.splitlines()
+    core_metrics_line = parsed_lines[7].split()
+    
+    result_row['Model'] = model_id
+    result_row['Accuracy'] = unseen_acc
+    result_row['Precision'] = float(core_metrics_line[1])
+    result_row['Recall'] = float(core_metrics_line[2])
+    result_row['F1_Score'] = float(core_metrics_line[3])
+    result_row['True Negative'] = unseen_conf_matrix[0][0]
+    result_row['False Positive'] = unseen_conf_matrix[0][1]
+    result_row['False Negative'] = unseen_conf_matrix[1][0]
+    result_row['True Positive'] = unseen_conf_matrix[1][1]
+
+    # Append detailed logs
+    evaluation_summary.extend([
+        f"\n--- {model_id} Evaluation on Unseen Data ---",
+        f"Accuracy: {unseen_acc:.4f}",
+        "Confusion Matrix:",
+        unseen_conf_matrix,
+        "Classification Report:",
+        unseen_report
+    ])
+
+    unseen_results.append(result_row)
+
+# To export the results to CSV:
+# pd.DataFrame(unseen_results).to_csv('UnseenModelResults.csv', index=False)
+# Pick one model for visualization on unseen dataset
+model_to_display = list(models_to_test.keys())[0]
+
+# Set up figure for the heatmap
+fig, axes = plt.subplots(figsize=(10, 8))
+
+# Train the selected model and make predictions on unseen data
+visual_model = models_to_test[model_to_display]
+visual_model.fit(X_iot_test, y_iot_test)
+unseen_predictions = visual_model.predict(X_iot_test)
+
+# Compute confusion matrix
+unseen_conf_matrix = metrics.confusion_matrix(y_iot_test, unseen_predictions)
+
+# Plot heatmap
+sbn.heatmap(unseen_conf_matrix, annot=True, fmt="d", cbar=False, ax=axes)
+axes.set_title(f"Unseen Data Confusion Matrix - {model_to_display}")
+axes.set_ylabel("True Labels")
+axes.set_xlabel("Predicted Labels")
+
+# Uncomment to display the plot in interactive environments
+# plt.show()
